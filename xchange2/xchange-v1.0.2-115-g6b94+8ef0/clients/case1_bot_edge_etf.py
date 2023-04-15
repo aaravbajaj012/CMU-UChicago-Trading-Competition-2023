@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 import time
-from typing import DefaultDict, Dict, Tuple
+from typing import DefaultDict, Dict, Tuple, List
 from utc_bot import UTCBot, start_bot
 import math
 import proto.utc_bot as pb
@@ -15,15 +15,32 @@ DAYS_IN_YEAR = 252
 INTEREST_RATE = 0.02
 NUM_FUTURES = 14
 TICK_SIZE = 0.01
+CARRYING_COST = 0.10
 FUTURE_CODES = [chr(ord('A') + i) for i in range(NUM_FUTURES)] # Suffix of monthly future code
 CONTRACTS = ['SBL'] +  ['LBS' + c for c in FUTURE_CODES] + ['LLL']
 
+MOVING_AVG_WINDOW = 20
 
 MIN_EDGE = 0.10
 FADE = 0.01
 SLACK = 0.10
-NUM_LEVELS = 5
-LEVELS = [i * (MIN_EDGE + SLACK) for i in range(1, NUM_LEVELS + 1)]
+NUM_LEVELS = 4
+
+LEVEL_SPREAD = 0.02
+
+ORDER_SIZE = 60
+
+LEVELS_ENABLED = True
+
+# 2023: m = 1.7838804404379633  b = 54.849618905657714
+# 2024: m = 1.60005651307329  b = 54.890769908266975
+# 2025: m = 1.4162325857086162  b = 54.931920910876244
+# 2026: m = 1.2324086583439426  b = 54.973071913485505
+WEATHER_TO_PRICE_M = 1.7838804404379633
+WEATHER_TO_PRICE_B = 54.849618905657714
+
+# TUNE Weights
+WEIGHTS = {"WEATHER_FAIR": 0.3, "SOYBEAN_MARKET" : 0.4, "FUTURES_MARKET" : 0.3}
 
 
 class Case1Bot(UTCBot):
@@ -55,16 +72,20 @@ class Case1Bot(UTCBot):
         '''
         future = ord(asset[-1]) - ord('A')
         expiry = 21 * (future + 1)
-        return self._day - expiry
+        return expiry - self._day
 
     async def handle_exchange_update(self, update: pb.FeedMessage):
+        print('called')
         '''
         Handles exchange updates
         '''
         kind, _ = betterproto.which_one_of(update, "msg")
+
+        print(kind)
         #Competition event messages
         if kind == "generic_msg":
             msg = update.generic_msg.message
+            #print('hi')
             
             # Used for API DO NOT TOUCH
             if 'trade_etf' in msg:
@@ -74,9 +95,10 @@ class Case1Bot(UTCBot):
             if "Weather" in update.generic_msg.message:
                 msg = update.generic_msg.message
                 weather = float(re.findall("\d+\.\d+", msg)[0])
+                self._weather_log_PS.append(self._weather_log_PS[-1] + weather)
                 self._weather_log.append(weather)
                 for asset in CONTRACTS:
-                    await self.calculate_fair_price(asset)
+                    self._fair_price[asset] = self.calculate_future_fair_price_weighted(asset, WEIGHTS)
                 #print(time.time(), "Weather:", weather)
                 #print("_________________________")
                 
@@ -93,15 +115,26 @@ class Case1Bot(UTCBot):
                 if resp.ok:
                     self.positions = resp.positions
 
-                    
-        elif kind == "MarketSnapshotMessage":
+         
+        elif kind == "market_snapshot_msg":
             for asset in CONTRACTS:
                 book = update.market_snapshot_msg.books[asset]
                 self._best_bid[asset] = float(book.bids[0].px)
                 self._best_ask[asset] = float(book.asks[0].px)
                 self._best_bid_qty[asset] = int(book.bids[0].qty)
                 self._best_ask_qty[asset] = int(book.asks[0].qty)
-            
+
+                # arbitrage where future > soybeans + carrying cost * days to expiry (buy soybeans and short future)
+                #    best future bid > best soybean ask + CC * N AND both "bests" are not self trades => 
+                #        ask at best futures bid, bid at best soybeans ask
+                #        (quantity = min (best futures bid qty, best soybeans ask qty))
+                #    else do nothing
+
+                # arbitrage where future < soybeans (buy future and short soybeans)
+                #    best future ask < best soybean bid AND both "bests" are not self trades => 
+                #        bid at best future ask, ask at best soybeans bid
+                #        (quantity = min(best futures ask qty, best soybeans bid qty)) 
+                
 
 
     async def handle_round_started(self):
@@ -109,7 +142,7 @@ class Case1Bot(UTCBot):
         self._day = 0
         ### Best Bid in the order book
         self._best_bid: Dict[str, float] = defaultdict(
-            lambda: 0
+            lambda: 55
         )
 
         self._best_bid_qty: Dict[str, int] = defaultdict(
@@ -118,72 +151,104 @@ class Case1Bot(UTCBot):
 
         ### Best Ask in the order book
         self._best_ask: Dict[str, float] = defaultdict(
-            lambda: 0
+            lambda: 55
         )
+        
 
         self._best_ask_qty: Dict[str, int] = defaultdict(
             lambda: 0
         )
 
-        ### Order book for market making
-        self.__orders: DefaultDict[str, Tuple[str, float]] = defaultdict(
-            lambda: ("", 0)
+
+        
+
+        self._bid_order_px: Dict[str, float] = defaultdict(
+            lambda: 0
         )
 
-        self._bid_orders: DefaultDict[str, Tuple[str, float]] = defaultdict(
-            lambda: ("", 0)
+        self._ask_order_px: Dict[str, float] = defaultdict(
+            lambda: 0
         )
 
-        self._ask_orders: DefaultDict[str, Tuple[str, float]] = defaultdict(
-            lambda: ("", 0)
+        self._bid_order_qty: Dict[str, int] = defaultdict(
+            lambda: 0
         )
+        
+        self._ask_order_qty: Dict[str, int] = defaultdict(
+            lambda: 0
+        )
+        
+        self.bid_id: Dict[str, str] = defaultdict(
+            lambda: ""
+        )
+
+        self._ask_id: Dict[str, str] = defaultdict(
+            lambda: ""
+        )
+
+        
 
         ### TODO Recording fair price for each asset
         self._fair_price: DefaultDict[str, float] = defaultdict(
             lambda: 55
         )
-        ### TODO spread fair price for each asset
-        self._spread: DefaultDict[str, float] = defaultdict(
-            lambda: MIN_EDGE
+
+        self._bid_levels: DefaultDict[str, List[str]] = defaultdict(
+            lambda: [str(i) for i in range(NUM_LEVELS)]
         )
 
-        ### TODO order size for market making positions
-        self._quantity: DefaultDict[str, int] = defaultdict(
-            lambda: 1
+        self._ask_levels: DefaultDict[str, List[str]] = defaultdict(
+            lambda: [str(i+NUM_LEVELS) for i in range(NUM_LEVELS)]
         )
+
         
         ### List of weather reports
         self._weather_log = []
+        self._weather_log_PS = [0]
+        
         
         await asyncio.sleep(.1)
-        ###
-        ### TODO START ASYNC FUNCTIONS HERE
-        ###
-        #asyncio.create_task(self.example_redeem_etf())
         
         # Starts market making for each asset
         for asset in CONTRACTS:
             asyncio.create_task(self.make_market_asset(asset))
 
-    # This is an example of creating and redeeming etfs
-    # You can remove this in your actual bots.
-    async def example_redeem_etf(self):
-        while True:
-            redeem_resp = await self.redeem_etf(1)
-            create_resp = await self.create_etf(5)
-            await asyncio.sleep(1)
-
 
     ### Helpful ideas
     async def calculate_risk_exposure(self):
         pass
+
+    def calculate_soybean_fair_price(self):
+        wl_len = len(self._weather_log_PS)
+
+        avg_weather_idx = 0
+
+        if wl_len <= (MOVING_AVG_WINDOW + 1):
+            avg_weather_idx = self._weather_log_PS[-1] / (wl_len - 1)
+        else:
+            avg_weather_idx = (self._weather_log_PS[-1] - self._weather_log_PS[-1 - MOVING_AVG_WINDOW]) / MOVING_AVG_WINDOW
+        
+        # map avg_weather_idx to soybean price
+        return WEATHER_TO_PRICE_M * avg_weather_idx + WEATHER_TO_PRICE_B
+
+    def calculate_future_fair_price_with_SB_fair(self, asset, soybean_fair):
+        return soybean_fair * (1 + INTEREST_RATE * (self.days_to_expiry(asset) / DAYS_IN_YEAR))
+
+    def calculate_future_market_price(self, asset):
+        return (self._best_bid[asset] + self._best_ask[asset]) / 2.0
     
-    # CHANGE FOR OUR FAIR PRICE MODEL
-    async def calculate_fair_price(self, asset):
-        #print("Calculating fair price for", asset)
-        self._fair_price[asset] = (self._best_bid[asset] + self._best_ask[asset]) / 2
-        if self._fair_price[asset] < 25:
-            self._fair_price[asset] = 55
+    # weights[0] -- weather
+    # weights[1] -- soybean market
+    # weights[2] -- futures market
+    def calculate_future_fair_price_weighted(self, asset, weights):
+        soybean_weather_price = self.calculate_soybean_fair_price()
+        soybean_market_price = (self._best_bid['SBL'] + self._best_ask['SBL']) / 2.0
+
+        future_weather_fp = self.calculate_future_fair_price_with_SB_fair(asset, soybean_weather_price)
+        future_SB_market_fp = self.calculate_future_fair_price_with_SB_fair(asset, soybean_market_price)
+        future_market_fp =  self.calculate_future_market_price(asset)
+
+        return weights["WEATHER_FAIR"] * future_weather_fp + weights["SOYBEAN_MARKET"] * future_SB_market_fp + weights["FUTURES_MARKET"] * future_market_fp
 
     async def calculate_bid_edge(self, asset):
         if self._fair_price[asset] - self._best_bid[asset] < MIN_EDGE:
@@ -201,14 +266,16 @@ class Case1Bot(UTCBot):
         else:
             return self._best_ask[asset] - self._fair_price[asset] - 0.01
         
-    async def find_arbitrage(self):
+    async def find_etf_arbitrage(self):
         # calculate bid price of ETF
         # calculate fair value of underlying assets that compose ETF
         # calculate the most recently expiring future
         month = (self._day-1) // 21 + 1
-        contract1 = CONTRACTS[month + 1]
-        contract2 = CONTRACTS[month + 2]
-        contract3 = CONTRACTS[month + 3]
+        contract1 = CONTRACTS[month]
+        contract2 = CONTRACTS[month + 1]
+        contract3 = CONTRACTS[month + 2]
+
+        # buy ETF, sell underlying futures
         if self._best_ask["LLL"] < 5 * self._best_bid[contract1] + 3 * self._best_bid[contract2] + 2 * self._best_bid[contract3]:
             minETFQty = min(self._best_ask_qty["LLL"], self._best_bid_qty[contract1], self._best_bid_qty[contract2], self._best_bid_qty[contract3])
             r1 = await self.place_order(
@@ -238,6 +305,8 @@ class Case1Bot(UTCBot):
                     )
             
             self.redeem_etf(minETFQty)
+        
+        # sell ETF, buy underlying futures
         elif self._best_bid["LLL"] > 5 * self._best_ask[contract1] + 3 * self._best_ask[contract2] + 2 * self._best_ask[contract3]:
             minETFQty = min(self._best_bid_qty["LLL"], self._best_ask_qty[contract1], self._best_ask_qty[contract2], self._best_ask_qty[contract3])
             r1 = await self.place_order(
@@ -266,51 +335,68 @@ class Case1Bot(UTCBot):
                         qty = minETFQty * 2
                     )
             self.create_etf(minETFQty)
-            
+
+    async def place_levels(self, asset: str, bid_px: float, ask_px : float):
+        # get the old bid and old ask and remove them from the book
+        ## Old prices
+        
+        for i in range(1, NUM_LEVELS+1):
+
+            r = await self.modify_order(
+                order_id=self._bid_levels[asset][i-1],
+                asset_code = asset,
+                order_type = pb.OrderSpecType.LIMIT,
+                order_side = pb.OrderSpecSide.BID,
+                qty = ORDER_SIZE,
+                price = round_nearest(bid_px - i * LEVEL_SPREAD)
+            )
+
+            self._bid_levels[asset][i-1] = r.order_id
+
+            r = await self.modify_order(
+                order_id=self._ask_levels[asset][i-1],
+                asset_code = asset,
+                order_type = pb.OrderSpecType.LIMIT,
+                order_side = pb.OrderSpecSide.ASK,
+                qty = ORDER_SIZE,
+                price = round_nearest(ask_px + i * LEVEL_SPREAD)
+            )
+
+            self._ask_levels[asset][i-1] = r.order_id
 
         
     async def make_market_asset(self, asset: str):
-        while self.days_to_expiry(asset) > 0:
-            ## Old prices
-            ub_oid, ub_price = self.__orders["underlying_bid_{}".format(asset)]
-            ua_oid, ua_price = self.__orders["underlying_ask_{}".format(asset)]
-            
-            bid_edge = await self.calculate_bid_edge(asset)
-            ask_edge = await self.calculate_ask_edge(asset)
-            bid_px = self._fair_price[asset] - bid_edge
-            ask_px = self._fair_price[asset] + ask_edge
-            
-            # If the underlying price moved first, adjust the ask first to avoid self-trades
-            if (bid_px + ask_px) > (ua_price + ub_price):
-                order = ["ask", "bid"]
-            else:
-                order = ["bid", "ask"]
 
-            for d in order:
-                if d == "bid":
-                    order_id = ub_oid
-                    order_side = pb.OrderSpecSide.BID
-                    order_px = bid_px
-                else:
-                    order_id = ua_oid
-                    order_side = pb.OrderSpecSide.ASK
-                    order_px = ask_px
+        while self.days_to_expiry(asset) >= 0:
+            pass
+            # if days_to_expiry > 1:
+                # get the fair price
+                # get the current position size
+                # get the faded fair price
+                # calculate edge around faded fair price using edge/slack/penny in
+                # place order pair and levels (make sure to do it in right order)
+                
+                # update the relevant variables 
+                # - update current market bid ask prices
+                # - update new levels
+        
+            # elif days_to_expiry == 1:
+            #  - close our current open positions
+            #     - if you have a long position:
+            #         - (if best market future bid price > current market soybean bid price) (sell futures)
+            #         - (else sell soybean)
+            #     - else: (short positions)
+            #         - 
+            #  - cancel current orders for that asset
 
-                r = await self.modify_order(
-                        order_id = order_id,
-                        asset_code = asset,
-                        order_type = pb.OrderSpecType.LIMIT,
-                        order_side = order_side,
-                        qty = self._quantity[asset],
-                        px = round_nearest(order_px, TICK_SIZE), 
-                    )
-                self.__orders[f"underlying_{d}_{asset}"] = (r.order_id, order_px)
-                print(f"Modified {d} order for {asset} to {order_px} on day {self._day} at {r.order_id}")                
+            # else: (<= 0)
+            # - clear all soybean positions 
+            
+       
         
 
-def round_nearest(x, a):
-    return round(round(x / a) * a, -int(math.floor(math.log10(a))))             
-
+def round_nearest(x):
+    return round(round(x / 0.01) * 0.01, 2)             
 
 
 if __name__ == "__main__":

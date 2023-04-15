@@ -76,13 +76,16 @@ class Case1Bot(UTCBot):
                 resp = await self.get_positions()
                 if resp.ok:
                     self.positions = resp.positions
-                    print(self.positions)
+                    #print(self.positions)
                     
-        elif kind == "MarketSnapshotMessage":
+        elif kind == "market_snapshot_msg":
             for asset in CONTRACTS:
                 book = update.market_snapshot_msg.books[asset]
-                self._best_bid[asset] = float(book.bids[0].px)
-                self._best_ask[asset] = float(book.bids[0].px)
+                #self._best_bid[asset] = float(book.bids[0].px)
+                self._best_ask[asset] = float(book.asks[0].px)
+                print(book.bids)
+                print(book.asks)
+                print("____________")
             
 
 
@@ -122,11 +125,11 @@ class Case1Bot(UTCBot):
         ###
         ### TODO START ASYNC FUNCTIONS HERE
         ###
-        asyncio.create_task(self.example_redeem_etf())
+       # asyncio.create_task(self.example_redeem_etf())
         
         # Starts market making for each asset
-        # for asset in CONTRACTS:
-            # asyncio.create_task(self.make_market_asset(asset))
+        for asset in CONTRACTS:
+            asyncio.create_task(self.make_market_asset(asset))
 
     # This is an example of creating and redeeming etfs
     # You can remove this in your actual bots.
@@ -147,38 +150,53 @@ class Case1Bot(UTCBot):
     async def make_market_asset(self, asset: str):
         while self._day <= DAYS_IN_YEAR:
             ## Old prices
-            ub_oid, ub_price = self.__orders["underlying_bid_{}".format(asset)]
-            ua_oid, ua_price = self.__orders["underlying_ask_{}".format(asset)]
+
+
+            # r = await self.modify_order(
+            #             order_id = "",
+            #             asset_code = asset,
+            #             order_type = pb.OrderSpecType.LIMIT,
+            #             order_side = pb.OrderSpecSide.ASK,
+            #             qty = 2,
+            #             px =  0.42,
+            # )
+
+
+            #print(self.positions)
+            await asyncio.sleep(1)
+                            
+            #ub_oid, ub_price = self.__orders["underlying_bid_{}".format(asset)]
+            #ua_oid, ua_price = self.__orders["underlying_ask_{}".format(asset)]
             
-            bid_px = self._fair_price[asset] - self._spread[asset]
-            ask_px = self._fair_price[asset] + self._spread[asset]
+            #bid_px = self._fair_price[asset] - self._spread[asset]
+            #ask_px = self._fair_price[asset] + self._spread[asset]
             
             # If the underlying price moved first, adjust the ask first to avoid self-trades
-            if (bid_px + ask_px) > (ua_price + ub_price):
-                order = ["ask", "bid"]
-            else:
-                order = ["bid", "ask"]
+            # if (bid_px + ask_px) > (ua_price + ub_price):
+            #     order = ["ask", "bid"]
+            # else:
+            #     order = ["bid", "ask"]
 
-            for d in order:
-                if d == "bid":
-                    order_id = ub_oid
-                    order_side = pb.OrderSpecSide.BID
-                    order_px = bid_px
-                else:
-                    order_id = ua_oid
-                    order_side = pb.OrderSpecSide.ASK
-                    order_px = ask_px
+            # for d in order:
+            #     if d == "bid":
+            #         order_id = ub_oid
+            #         order_side = pb.OrderSpecSide.BID
+            #         order_px = bid_px
+            #     else:
+            #         order_id = ua_oid
+            #         order_side = pb.OrderSpecSide.ASK
+            #         order_px = ask_px
 
-                r = await self.modify_order(
-                        order_id = order_id,
-                        asset_code = asset,
-                        order_type = pb.OrderSpecType.LIMIT,
-                        order_side = order_side,
-                        qty = self._quantity[asset],
-                        px = round_nearest(order_px, TICK_SIZE), 
-                    )
+            #     r = await self.modify_order(
+            #             order_id = order_id,
+            #             asset_code = asset,
+            #             order_type = pb.OrderSpecType.LIMIT,
+            #             order_side = order_side,
+            #             qty = self._quantity[asset],
+            #             px = round_nearest(order_px, TICK_SIZE), 
+            #         )
 
-                self.__orders[f"underlying_{d}_{asset}"] = (r.order_id, order_px)
+            #     self.__orders[f"underlying_{d}_{asset}"] = (r.order_id, order_px)
                 
         
 
