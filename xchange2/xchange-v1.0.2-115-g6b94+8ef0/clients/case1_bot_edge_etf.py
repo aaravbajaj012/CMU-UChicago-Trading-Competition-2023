@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 
 from collections import defaultdict
-import time
-from typing import DefaultDict, Dict, Tuple, List
+from typing import DefaultDict, Dict, List
 from utc_bot import UTCBot, start_bot
 import math
 import proto.utc_bot as pb
@@ -75,39 +74,32 @@ class Case1Bot(UTCBot):
         return expiry - self._day
 
     async def handle_exchange_update(self, update: pb.FeedMessage):
-        print('called')
         '''
         Handles exchange updates
         '''
+
         kind, _ = betterproto.which_one_of(update, "msg")
 
-        print(kind)
         #Competition event messages
         if kind == "generic_msg":
             msg = update.generic_msg.message
-            #print('hi')
+            print(type(msg))
             
             # Used for API DO NOT TOUCH
             if 'trade_etf' in msg:
                 self.etf_suffix = msg.split(' ')[1]
                 
             # Updates current weather
-            if "Weather" in update.generic_msg.message:
-                msg = update.generic_msg.message
+            if "Weather" in msg:
                 weather = float(re.findall("\d+\.\d+", msg)[0])
                 self._weather_log_PS.append(self._weather_log_PS[-1] + weather)
                 self._weather_log.append(weather)
                 for asset in CONTRACTS:
                     self._fair_price[asset] = self.calculate_future_fair_price_weighted(asset, WEIGHTS)
-                #print(time.time(), "Weather:", weather)
-                #print("_________________________")
                 
             # Updates date
-            if "Day" in update.generic_msg.message:
+            if "Day" in msg:
                 self._day = int(re.findall("\d+", msg)[0])
-                #print("Day:", self._day, "Positions:", self.positions)
-                #print("Positions: ", self.positions)
-                #print("_________________________")
                             
             # Updates positions if unknown message (probably etf swap)
             else:
@@ -159,9 +151,6 @@ class Case1Bot(UTCBot):
             lambda: 0
         )
 
-
-        
-
         self._bid_order_px: Dict[str, float] = defaultdict(
             lambda: 0
         )
@@ -186,7 +175,6 @@ class Case1Bot(UTCBot):
             lambda: ""
         )
 
-        
 
         ### TODO Recording fair price for each asset
         self._fair_price: DefaultDict[str, float] = defaultdict(
@@ -210,13 +198,9 @@ class Case1Bot(UTCBot):
         await asyncio.sleep(.1)
         
         # Starts market making for each asset
-        for asset in CONTRACTS:
-            asyncio.create_task(self.make_market_asset(asset))
+        # for asset in CONTRACTS:
+        #     asyncio.create_task(self.make_market_asset(asset))
 
-
-    ### Helpful ideas
-    async def calculate_risk_exposure(self):
-        pass
 
     def calculate_soybean_fair_price(self):
         wl_len = len(self._weather_log_PS)
@@ -250,7 +234,7 @@ class Case1Bot(UTCBot):
 
         return weights["WEATHER_FAIR"] * future_weather_fp + weights["SOYBEAN_MARKET"] * future_SB_market_fp + weights["FUTURES_MARKET"] * future_market_fp
 
-    async def calculate_bid_edge(self, asset):
+    def calculate_bid_edge(self, asset):
         if self._fair_price[asset] - self._best_bid[asset] < MIN_EDGE:
             return MIN_EDGE
         elif self._fair_price[asset] - self._best_bid[asset] > (MIN_EDGE + SLACK):
@@ -258,88 +242,15 @@ class Case1Bot(UTCBot):
         else:
             return self._fair_price[asset] - self._best_bid[asset] - 0.01
         
-    async def calculate_ask_edge(self, asset):
+    def calculate_ask_edge(self, asset):
         if self._best_ask[asset] - self._fair_price[asset] < MIN_EDGE:
             return MIN_EDGE
         elif self._best_ask[asset] - self._fair_price[asset] > (MIN_EDGE + SLACK):
             return MIN_EDGE + SLACK
         else:
             return self._best_ask[asset] - self._fair_price[asset] - 0.01
-        
-    async def find_etf_arbitrage(self):
-        # calculate bid price of ETF
-        # calculate fair value of underlying assets that compose ETF
-        # calculate the most recently expiring future
-        month = (self._day-1) // 21 + 1
-        contract1 = CONTRACTS[month]
-        contract2 = CONTRACTS[month + 1]
-        contract3 = CONTRACTS[month + 2]
-
-        # buy ETF, sell underlying futures
-        if self._best_ask["LLL"] < 5 * self._best_bid[contract1] + 3 * self._best_bid[contract2] + 2 * self._best_bid[contract3]:
-            minETFQty = min(self._best_ask_qty["LLL"], self._best_bid_qty[contract1], self._best_bid_qty[contract2], self._best_bid_qty[contract3])
-            r1 = await self.place_order(
-                        asset_code = "LLL",
-                        order_type = pb.OrderSpecType.MARKET,
-                        order_side = pb.OrderSpecSide.BID,
-                        qty = minETFQty
-                    )
-            #self.__orders["LLL"] = (r1.order_id, r1.order_price)
-            r2 = await self.place_order(
-                        asset_code = contract1,
-                        order_type = pb.OrderSpecType.MARKET,
-                        order_side = pb.OrderSpecSide.ASK,
-                        qty = minETFQty * 5
-                    )
-            r3 = await self.place_order(
-                        asset_code = contract2,
-                        order_type = pb.OrderSpecType.MARKET,
-                        order_side = pb.OrderSpecSide.ASK,
-                        qty = minETFQty * 3
-                    )
-            r4 = await self.place_order(
-                        asset_code = contract3,
-                        order_type = pb.OrderSpecType.MARKET,
-                        order_side = pb.OrderSpecSide.ASK,
-                        qty = minETFQty * 2
-                    )
-            
-            self.redeem_etf(minETFQty)
-        
-        # sell ETF, buy underlying futures
-        elif self._best_bid["LLL"] > 5 * self._best_ask[contract1] + 3 * self._best_ask[contract2] + 2 * self._best_ask[contract3]:
-            minETFQty = min(self._best_bid_qty["LLL"], self._best_ask_qty[contract1], self._best_ask_qty[contract2], self._best_ask_qty[contract3])
-            r1 = await self.place_order(
-                        asset_code = "LLL",
-                        order_type = pb.OrderSpecType.MARKET,
-                        order_side = pb.OrderSpecSide.ASK,
-                        qty = minETFQty
-                    )
-            #self.__orders["LLL"] = (r1.order_id, r1.order_price)
-            r2 = await self.place_order(
-                        asset_code = contract1,
-                        order_type = pb.OrderSpecType.MARKET,
-                        order_side = pb.OrderSpecSide.BID,
-                        qty = minETFQty * 5
-                    )
-            r3 = await self.place_order(
-                        asset_code = contract2,
-                        order_type = pb.OrderSpecType.MARKET,
-                        order_side = pb.OrderSpecSide.BID,
-                        qty = minETFQty * 3
-                    )
-            r4 = await self.place_order(
-                        asset_code = contract3,
-                        order_type = pb.OrderSpecType.MARKET,
-                        order_side = pb.OrderSpecSide.BID,
-                        qty = minETFQty * 2
-                    )
-            self.create_etf(minETFQty)
 
     async def place_levels(self, asset: str, bid_px: float, ask_px : float):
-        # get the old bid and old ask and remove them from the book
-        ## Old prices
-        
         for i in range(1, NUM_LEVELS+1):
 
             r = await self.modify_order(
@@ -368,7 +279,7 @@ class Case1Bot(UTCBot):
     async def make_market_asset(self, asset: str):
 
         while self.days_to_expiry(asset) >= 0:
-            pass
+            await asyncio.sleep(.1)
             # if days_to_expiry > 1:
                 # get the fair price
                 # get the current position size
